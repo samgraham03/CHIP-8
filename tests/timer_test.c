@@ -8,7 +8,7 @@
 int main() {
     timer_60hz_t timer;
 
-    timer_60hz_start(&timer);
+    timer_60hz_set(&timer, 0xFF);
 
     struct timeval start_time = timer.time_stamp;
 

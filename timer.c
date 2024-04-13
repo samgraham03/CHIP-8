@@ -2,8 +2,8 @@
 
 #include <unistd.h>
 
-void timer_60hz_start(timer_60hz_t* timer) {
-    timer->counter = 0xFF;
+void timer_60hz_set(timer_60hz_t* timer, const uint8_t value) {
+    timer->counter = value;
     timer->us_passed = 0;
     (void) gettimeofday(&timer->time_stamp, NULL);
 }
