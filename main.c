@@ -1,13 +1,33 @@
+#include <SDL2/SDL.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "timer.h"
 
 // Using this guide by Tobias V. Langhoff as a feature reference
 // https://tobiasvl.github.io/blog/write-a-chip-8-emulator/
+
+const unsigned int LOGICAL_WIDTH = 64;
+const unsigned int LOGICAL_HEIGHT = 32;
+
+const unsigned int SCREEN_WIDTH = 10*LOGICAL_WIDTH;
+const unsigned int SCREEN_HEIGHT = 10*LOGICAL_HEIGHT;
+
+const unsigned int STACK_SIZE = 48;
+const unsigned int MEMORY_SIZE = 4096;
+
+const unsigned int FONT_OFFSET = 50;
+const unsigned int LOAD_OFFSET = 512;
+
+SDL_Renderer* renderer = NULL;
+
+// 64x32 display
+bool display[LOGICAL_WIDTH][LOGICAL_HEIGHT];
 
 struct {
     uint16_t PC;
@@ -15,18 +35,18 @@ struct {
     uint8_t V[16];
 } reg;
 
-uint8_t memory[4096];
+uint8_t memory[MEMORY_SIZE];
 
 timer_60hz_t delay_timer = { .counter = 0x0 };
 timer_60hz_t sound_timer = { .counter = 0x0 };
 
 struct {
     int top;
-    uint16_t addr[16]; // todo: review stack size
+    uint16_t addr[STACK_SIZE]; // todo: review stack size
 } stack = { .top = 0 };
 
 void push_address(const uint16_t addr) {
-    if (stack.top == 16) {
+    if (stack.top == STACK_SIZE) {
         printf("Stack overflow\n");
         exit(EXIT_FAILURE);
     }
@@ -48,6 +68,51 @@ uint16_t fetch() {
     return msb << 8 | lsb;
 }
 
+void clear_display() {
+    (void) SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255); // Set color to black
+    (void) SDL_RenderClear(renderer);
+    (void) SDL_RenderPresent(renderer);
+    (void) memset(display, 0, sizeof(display));
+}
+
+void draw(uint8_t X, uint8_t Y, uint8_t N) {
+    X %= LOGICAL_WIDTH;
+    Y %= LOGICAL_HEIGHT;
+
+    reg.V[0xF] = 0U;
+
+    for (int n = 0; (n < N) && (Y+n < LOGICAL_HEIGHT); n++) {
+        const uint8_t sprite = memory[reg.I + n];
+
+        for (uint8_t b = 0; (b < 8) && (X+b < LOGICAL_WIDTH); b++) {
+            const bool sprite_pixel = sprite & (1U << (7-b));
+            const bool display_pixel = display[X+b][Y+n];
+
+            if (display_pixel != sprite_pixel) { // XOR on bool type
+                display[X+b][Y+n] = !display_pixel; // Flip the "bit"
+            } else if (sprite_pixel && display_pixel) { // AND on bool type
+                reg.V[0xF] = 1U;
+            }
+        }
+    }
+    
+    // todo: maintain a texture, update it above (only on pixel change) and re-render it here
+
+    // Redraw display
+    for (int y = 0; y < LOGICAL_HEIGHT; y++) {
+        for (int x = 0; x < LOGICAL_WIDTH; x++) {
+            if (display[x][y]) {
+                (void) SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255); // Set color to white
+            } else {
+                (void) SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255); // Set color to black
+            }
+            (void) SDL_RenderDrawPoint(renderer, x, y); // draw the pixel
+        }
+    }
+
+    (void) SDL_RenderPresent(renderer);
+}
+
 // Decode implementation based on CHIP-8 opcode table from Wikipedia
 // https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
 void decode_and_execute(const uint16_t opcode) {
@@ -61,8 +126,8 @@ void decode_and_execute(const uint16_t opcode) {
     switch (MSN) {
     case 0x0:
         switch (NN) {
-        case 0xE0:
-            printf("clear display");
+        case 0xE0: // Clear display
+            clear_display();
             break;
         case 0xEE: // Return from subroutine
             reg.PC = pop_address();
@@ -144,10 +209,10 @@ void decode_and_execute(const uint16_t opcode) {
         reg.PC = reg.V[0x0] + NNN;
         break;
     case 0xC: // Set Vx = rand() & NN
-        reg.V[X] = (rand() % (0xFFU + 0x1U)) & NN;
+        reg.V[X] = (rand() % 256U) & NN;
         break;
-    case 0xD:
-        printf("draw(Vx, Vy, N)");
+    case 0xD: // Draw sprite to display
+        draw(reg.V[X], reg.V[Y], N);
         break;
     case 0xE:
         switch (NN) {
@@ -178,8 +243,8 @@ void decode_and_execute(const uint16_t opcode) {
         case 0x1E: // Set I += Vx
             reg.I += reg.V[X];
             break;
-        case 0x29:
-            printf("Set I = sprite_addr[Vx]");
+        case 0x29: // Set I to sprite for hex value at Vx 
+            reg.I = FONT_OFFSET + reg.V[X];
             break;
         case 0x33: // Store BCD representation of Vx at I->I+2
             memory[reg.I + 0U] = (reg.V[X]/100)%10;
@@ -203,7 +268,9 @@ void decode_and_execute(const uint16_t opcode) {
     return;
 
 bad_opcode:
-    printf("Bad opcode: %0X\n", opcode);
+    printf("Bad opcode: %04X\n", opcode);
+    printf("PC: %i\n", reg.PC);
+    sleep(1);
     exit(EXIT_FAILURE);
 }
 
@@ -227,12 +294,84 @@ const uint8_t font[] = {
     0xF0, 0x80, 0xF0, 0x80, 0x80  // F
 };
 
-int main() {
-    srand(time(0));
-    // load font into memory at offset 50
-    (void) memcpy(memory + 50, font, sizeof(font));
+long load(const char* file_name) {
+    FILE* file = fopen(file_name, "rb");
 
-    // todo
+    (void) fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    (void) fseek(file, 0, SEEK_SET);
+
+    if (MEMORY_SIZE - LOAD_OFFSET < file_size) {
+        printf("ROM is too large");
+        exit(EXIT_FAILURE);
+    }
+
+    // Copy ROM into memory
+    (void) fread(memory + LOAD_OFFSET, sizeof(uint8_t), file_size, file);
+
+    (void) fclose(file);
+
+    reg.PC = LOAD_OFFSET;
+
+    return file_size;
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        printf("usage: %s <file>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    srand(time(0));
+
+    // load font into memory
+    (void) memcpy(memory + FONT_OFFSET, font, sizeof(font));
+
+    // Zero out registers
+    (void) memset(&reg, 0, sizeof(reg));
+
+    // load ROM into memory
+    const long file_size = load(argv[1]);
+
+    (void) SDL_Init(SDL_INIT_VIDEO);
+
+    SDL_Window* window = NULL;
+
+    window = SDL_CreateWindow("CHIP-8", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+
+    (void) SDL_RenderSetLogicalSize(renderer, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+
+    clear_display();
+
+    SDL_Event e;
+    while (1) {
+        (void) SDL_PollEvent(&e);
+        if (e.type == SDL_QUIT) {
+            for (int i = 0; i < LOGICAL_HEIGHT; i++) {
+                for (int j = 0; j < LOGICAL_WIDTH; j++) {
+                    printf(display[j][i] ? "X" : " ");
+                }
+                printf("\n");
+            }
+            break;
+        }
+
+        if (reg.PC < LOAD_OFFSET || reg.PC > LOAD_OFFSET + file_size) {
+            printf("PC out of range\n");
+            break;
+        }
+
+        decode_and_execute(fetch());
+
+        timer_60hz_decrement(&delay_timer);
+        timer_60hz_decrement(&sound_timer);
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+
+    SDL_Quit();
 
     return 0;
 }
