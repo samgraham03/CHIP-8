@@ -25,9 +25,13 @@ const unsigned int FONT_OFFSET = 50;
 const unsigned int LOAD_OFFSET = 512;
 
 SDL_Renderer* renderer = NULL;
+SDL_Texture* texture = NULL;
+
+const uint32_t WHITE = 0xFFFFFFFF;
+const uint32_t BLACK = 0x000000FF;
 
 // 64x32 display
-bool display[LOGICAL_WIDTH][LOGICAL_HEIGHT];
+uint32_t display[LOGICAL_WIDTH*LOGICAL_HEIGHT];
 
 struct {
     uint16_t PC;
@@ -85,32 +89,20 @@ void draw(uint8_t X, uint8_t Y, uint8_t N) {
         const uint8_t sprite = memory[reg.I + n];
 
         for (uint8_t b = 0; (b < 8) && (X+b < LOGICAL_WIDTH); b++) {
-            const bool sprite_pixel = sprite & (1U << (7-b));
-            const bool display_pixel = display[X+b][Y+n];
+            const uint32_t sprite_pixel = sprite & (1U << (7U-b)) ? WHITE : BLACK;
 
-            if (display_pixel != sprite_pixel) { // XOR on bool type
-                display[X+b][Y+n] = !display_pixel; // Flip the "bit"
-            } else if (sprite_pixel && display_pixel) { // AND on bool type
+            // If both pixels are on, set VF to 1
+            if ( (sprite_pixel == WHITE) && (display[(Y+n)*LOGICAL_WIDTH + (X+b)] == WHITE) ) {
                 reg.V[0xF] = 1U;
             }
-        }
-    }
-    
-    // todo: maintain a texture, update it above (only on pixel change) and re-render it here
 
-    // Redraw display
-    for (int y = 0; y < LOGICAL_HEIGHT; y++) {
-        for (int x = 0; x < LOGICAL_WIDTH; x++) {
-            if (display[x][y]) {
-                (void) SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255); // Set color to white
-            } else {
-                (void) SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255); // Set color to black
-            }
-            (void) SDL_RenderDrawPoint(renderer, x, y); // draw the pixel
+            display[(Y+n)*LOGICAL_WIDTH + (X+b)] = sprite_pixel;
         }
     }
 
-    (void) SDL_RenderPresent(renderer);
+    SDL_UpdateTexture(texture, NULL, display, LOGICAL_WIDTH * sizeof(uint32_t));
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_RenderPresent(renderer);
 }
 
 // Decode implementation based on CHIP-8 opcode table from Wikipedia
@@ -339,6 +331,7 @@ int main(int argc, char* argv[]) {
 
     window = SDL_CreateWindow("CHIP-8", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, LOGICAL_WIDTH, LOGICAL_HEIGHT);
 
     (void) SDL_RenderSetLogicalSize(renderer, LOGICAL_WIDTH, LOGICAL_HEIGHT);
 
@@ -348,12 +341,6 @@ int main(int argc, char* argv[]) {
     while (1) {
         (void) SDL_PollEvent(&e);
         if (e.type == SDL_QUIT) {
-            for (int i = 0; i < LOGICAL_HEIGHT; i++) {
-                for (int j = 0; j < LOGICAL_WIDTH; j++) {
-                    printf(display[j][i] ? "X" : " ");
-                }
-                printf("\n");
-            }
             break;
         }
 
